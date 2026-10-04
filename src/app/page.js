@@ -1,13 +1,12 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Mic, ShieldCheck, ArrowRight, Clock, CheckCircle2, Sparkles, Volume2 } from 'lucide-react';
+import { PhoneOff, Mic, ArrowRight, Clock, CheckCircle2, Volume2 } from 'lucide-react';
 
 export default function CallingApp() {
   // Step: 'phone_entry' | 'in_call' | 'call_summary'
   const [step, setStep] = useState('phone_entry');
   const [phone, setPhone] = useState('');
-  const [countryCode, setCountryCode] = useState('+91');
   const [turnstileToken, setTurnstileToken] = useState('');
   const [verifying, setVerifying] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -18,7 +17,6 @@ export default function CallingApp() {
   const [audioLevel, setAudioLevel] = useState(0.2);
   const [liveTranscript, setLiveTranscript] = useState('');
   const [aiIsSpeaking, setAiIsSpeaking] = useState(false);
-  const [ticketLogged, setTicketLogged] = useState(false);
 
   const turnstileContainerRef = useRef(null);
   const turnstileWidgetId = useRef(null);
@@ -49,7 +47,6 @@ export default function CallingApp() {
               setErrorMessage('');
             },
             'error-callback': () => {
-              // If turnstile fails or offline, set mock token in development
               setTurnstileToken('XXXX.DUMMY.TOKEN.XXXX');
             },
           });
@@ -78,10 +75,8 @@ export default function CallingApp() {
     if (step === 'in_call') {
       const updateBall = () => {
         if (aiIsSpeaking) {
-          // Dynamic pulsing during speech
           setAudioLevel(0.4 + Math.random() * 0.6);
         } else {
-          // Subtle breathing state
           setAudioLevel(0.15 + Math.sin(Date.now() / 400) * 0.1);
         }
         animId = requestAnimationFrame(updateBall);
@@ -96,9 +91,9 @@ export default function CallingApp() {
     e.preventDefault();
     setErrorMessage('');
 
-    const cleanNum = phone.replace(/\D/g, '');
-    if (cleanNum.length < 10) {
-      setErrorMessage('Please enter a valid 10-digit mobile number.');
+    const cleanNum = phone.trim();
+    if (!cleanNum || cleanNum.replace(/\D/g, '').length < 7) {
+      setErrorMessage('Please enter a valid phone number.');
       return;
     }
 
@@ -111,7 +106,7 @@ export default function CallingApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: turnstileToken || 'XXXX.DUMMY.TOKEN.XXXX',
-          phone: `${countryCode} ${cleanNum}`,
+          phone: cleanNum,
         }),
       });
 
@@ -124,7 +119,7 @@ export default function CallingApp() {
 
       // Verification passed -> initiate call
       setStep('in_call');
-      initiateLiveCall(`${countryCode}${cleanNum}`);
+      initiateLiveCall(cleanNum);
     } catch (err) {
       console.error(err);
       setErrorMessage('Unable to connect. Please check connection and try again.');
@@ -170,7 +165,6 @@ export default function CallingApp() {
 
       setAiIsSpeaking(true);
       source.onended = () => {
-        // queue handling
         if (audioQueueRef.current.length > 0) {
           const next = audioQueueRef.current.shift();
           playAudioChunk(next);
@@ -198,12 +192,10 @@ export default function CallingApp() {
     ws.onopen = async () => {
       setCallState('talking');
       try {
-        // Initialize Web Audio Context
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         const audioCtx = new AudioContext({ sampleRate: 24000 });
         audioContextRef.current = audioCtx;
 
-        // Request user microphone
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -214,7 +206,6 @@ export default function CallingApp() {
         });
         mediaStreamRef.current = stream;
 
-        // Setup Audio Processor
         const source = audioCtx.createMediaStreamSource(stream);
         const processor = audioCtx.createScriptProcessor(4096, 1, 1);
         processorRef.current = processor;
@@ -251,9 +242,6 @@ export default function CallingApp() {
 
         if (data.type === 'transcript') {
           setLiveTranscript(data.text);
-          if (data.text.toLowerCase().includes('ticket') || data.text.toLowerCase().includes('admin')) {
-            setTicketLogged(true);
-          }
         }
 
         if (data.type === 'audio_delta') {
@@ -268,7 +256,6 @@ export default function CallingApp() {
         }
 
         if (data.type === 'interrupt') {
-          // Stop current audio playback
           audioQueueRef.current = [];
           setAiIsSpeaking(false);
         }
@@ -292,7 +279,6 @@ export default function CallingApp() {
       wsRef.current.close();
     }
 
-    // Stop microphone
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
     }
@@ -314,245 +300,142 @@ export default function CallingApp() {
   };
 
   return (
-    <main style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* Top Partnex Brand Header */}
-      <header
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '1.25rem 2rem',
-          borderBottom: '1px solid var(--border-subtle)',
-          backgroundColor: 'rgba(10, 10, 12, 0.8)',
-          backdropFilter: 'blur(12px)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <div
-            style={{
-              width: '36px',
-              height: '36px',
-              borderRadius: '10px',
-              background: 'linear-gradient(135deg, #f6821f, #ff9f43)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 16px var(--cf-orange-glow)',
-            }}
-          >
-            <Sparkles size={20} color="#fff" />
-          </div>
-          <div>
-            <h1 style={{ fontSize: '1.15rem', fontWeight: 700, letterSpacing: '-0.02em', color: '#fff' }}>
-              Partnex
-            </h1>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Software Development Services</p>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <span
-            style={{
-              display: 'inline-block',
-              width: '8px',
-              height: '8px',
-              borderRadius: '50%',
-              backgroundColor: '#10b981',
-              boxShadow: '0 0 8px #10b981',
-            }}
-          />
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 500 }}>
-            Live AI Assistant
-          </span>
-        </div>
-      </header>
-
-      {/* STEP 1: PURE, CLEAN PHONE ENTRY PAGE (NO JUNK, NO BLUFF) */}
+    <main style={{ minHeight: '100vh', minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
+      {/* STEP 1: ULTRA-CLEAN PHONE ENTRY (NO HEADER, NO CARD, NO COUNTRY SELECTOR) */}
       {step === 'phone_entry' && (
         <section
           style={{
             flex: 1,
             display: 'flex',
+            flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            padding: '2rem 1rem',
+            padding: '2rem 1.5rem',
+            width: '100%',
+            maxWidth: '480px',
+            margin: '0 auto',
           }}
         >
-          <div
+          <div style={{ textAlign: 'center', marginBottom: '2.5rem', width: '100%' }}>
+            <h1
+              style={{
+                fontSize: '2.25rem',
+                fontWeight: 800,
+                color: '#fff',
+                letterSpacing: '-0.03em',
+                marginBottom: '0.75rem',
+              }}
+            >
+              What is your phone number?
+            </h1>
+          </div>
+
+          <form
+            onSubmit={handleStartCall}
             style={{
               width: '100%',
-              maxWidth: '460px',
-              backgroundColor: 'var(--bg-surface)',
-              borderRadius: '24px',
-              border: '1px solid var(--border-subtle)',
-              padding: '2.5rem 2rem',
-              boxShadow: '0 20px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(246, 130, 31, 0.05)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1.5rem',
             }}
           >
-            <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-              <div
-                style={{
-                  width: '56px',
-                  height: '56px',
-                  borderRadius: '16px',
-                  backgroundColor: 'var(--cf-orange-subtle)',
-                  border: '1px solid var(--border-active)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  margin: '0 auto 1.25rem',
-                  color: 'var(--cf-orange)',
-                }}
-              >
-                <Phone size={28} />
-              </div>
-              <h2 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#fff', marginBottom: '0.5rem' }}>
-                Talk to Partnex Support
-              </h2>
-              <p style={{ fontSize: '0.95rem', color: 'var(--text-muted)', lineHeight: '1.5' }}>
-                What is your phone number?
-              </p>
-            </div>
-
-            <form onSubmit={handleStartCall} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              <div>
-                <label
-                  style={{
-                    display: 'block',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                    color: 'var(--text-muted)',
-                    marginBottom: '0.5rem',
-                  }}
-                >
-                  Phone Number
-                </label>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: '14px',
-                    padding: '0.25rem 0.5rem',
-                    transition: 'all 0.2s ease',
-                  }}
-                >
-                  <select
-                    value={countryCode}
-                    onChange={(e) => setCountryCode(e.target.value)}
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: 'var(--cf-orange)',
-                      fontWeight: 600,
-                      fontSize: '1rem',
-                      padding: '0.75rem 0.5rem',
-                      cursor: 'pointer',
-                      outline: 'none',
-                    }}
-                  >
-                    <option value="+91" style={{ background: '#121316', color: '#fff' }}>🇮🇳 +91</option>
-                    <option value="+1" style={{ background: '#121316', color: '#fff' }}>🇺🇸 +1</option>
-                    <option value="+44" style={{ background: '#121316', color: '#fff' }}>🇬🇧 +44</option>
-                    <option value="+971" style={{ background: '#121316', color: '#fff' }}>🇦🇪 +971</option>
-                  </select>
-
-                  <div style={{ width: '1px', height: '24px', backgroundColor: 'var(--border-subtle)' }} />
-
-                  <input
-                    type="tel"
-                    id="phone-input"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    placeholder="98765 43210"
-                    maxLength={14}
-                    style={{
-                      flex: 1,
-                      background: 'transparent',
-                      border: 'none',
-                      padding: '0.75rem 1rem',
-                      fontSize: '1.15rem',
-                      color: '#fff',
-                      fontFamily: 'inherit',
-                      fontWeight: 500,
-                    }}
-                    autoFocus
-                  />
-                </div>
-              </div>
-
-              {/* Cloudflare Turnstile Verification Widget */}
-              <div style={{ display: 'flex', justifyContent: 'center', margin: '0.5rem 0' }}>
-                <div ref={turnstileContainerRef} id="cf-turnstile" />
-              </div>
-
-              {errorMessage && (
-                <div
-                  style={{
-                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                    border: '1px solid rgba(239, 68, 68, 0.3)',
-                    color: '#f87171',
-                    padding: '0.75rem 1rem',
-                    borderRadius: '10px',
-                    fontSize: '0.85rem',
-                    textAlign: 'center',
-                  }}
-                >
-                  {errorMessage}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                id="connect-call-btn"
-                disabled={verifying}
-                style={{
-                  background: 'linear-gradient(135deg, #f6821f, #e56d0a)',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '14px',
-                  padding: '1rem 1.5rem',
-                  fontSize: '1.05rem',
-                  fontWeight: 700,
-                  cursor: verifying ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '0.75rem',
-                  boxShadow: '0 6px 20px var(--cf-orange-glow)',
-                  transition: 'all 0.2s ease',
-                  opacity: verifying ? 0.7 : 1,
-                }}
-              >
-                {verifying ? (
-                  <span>Verifying...</span>
-                ) : (
-                  <>
-                    <span>Start Voice Call</span>
-                    <ArrowRight size={20} />
-                  </>
-                )}
-              </button>
-            </form>
-
             <div
               style={{
-                marginTop: '1.5rem',
+                display: 'flex',
+                alignItems: 'center',
+                backgroundColor: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: '16px',
+                padding: '0.5rem 1rem',
+                transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = 'var(--cf-orange)';
+                e.currentTarget.style.boxShadow = '0 0 20px rgba(246, 130, 31, 0.25)';
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              <input
+                type="tel"
+                id="phone-input"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="Enter phone number"
+                style={{
+                  width: '100%',
+                  background: 'transparent',
+                  border: 'none',
+                  padding: '0.85rem 0.5rem',
+                  fontSize: '1.35rem',
+                  color: '#fff',
+                  fontFamily: 'inherit',
+                  fontWeight: 600,
+                  outline: 'none',
+                  textAlign: 'center',
+                }}
+                autoFocus
+              />
+            </div>
+
+            {/* Cloudflare Turnstile */}
+            <div style={{ display: 'flex', justifyContent: 'center', margin: '0.25rem 0' }}>
+              <div ref={turnstileContainerRef} id="cf-turnstile" />
+            </div>
+
+            {errorMessage && (
+              <div
+                style={{
+                  backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#f87171',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '12px',
+                  fontSize: '0.9rem',
+                  textAlign: 'center',
+                }}
+              >
+                {errorMessage}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              id="connect-call-btn"
+              disabled={verifying}
+              style={{
+                width: '100%',
+                background: 'linear-gradient(135deg, #f6821f, #e56d0a)',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '16px',
+                padding: '1.15rem 1.75rem',
+                fontSize: '1.15rem',
+                fontWeight: 700,
+                cursor: verifying ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: '0.5rem',
-                fontSize: '0.75rem',
-                color: 'var(--text-muted)',
+                gap: '0.75rem',
+                boxShadow: '0 8px 24px var(--cf-orange-glow)',
+                transition: 'transform 0.15s ease, opacity 0.15s ease',
+                opacity: verifying ? 0.7 : 1,
               }}
+              onMouseDown={(e) => (e.currentTarget.style.transform = 'scale(0.98)')}
+              onMouseUp={(e) => (e.currentTarget.style.transform = 'scale(1)')}
             >
-              <ShieldCheck size={14} color="#f6821f" />
-              <span>Protected by Cloudflare Turnstile</span>
-            </div>
-          </div>
+              {verifying ? (
+                <span>Connecting...</span>
+              ) : (
+                <>
+                  <span>Continue</span>
+                  <ArrowRight size={22} />
+                </>
+              )}
+            </button>
+          </form>
         </section>
       )}
 
@@ -770,20 +653,14 @@ export default function CallingApp() {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            padding: '2rem 1rem',
+            padding: '2rem 1.5rem',
+            width: '100%',
+            maxWidth: '500px',
+            margin: '0 auto',
+            textAlign: 'center',
           }}
         >
-          <div
-            style={{
-              width: '100%',
-              maxWidth: '480px',
-              backgroundColor: 'var(--bg-surface)',
-              borderRadius: '24px',
-              border: '1px solid var(--border-subtle)',
-              padding: '2.5rem 2rem',
-              textAlign: 'center',
-            }}
-          >
+          <div style={{ width: '100%' }}>
             <div
               style={{
                 width: '64px',
@@ -801,40 +678,15 @@ export default function CallingApp() {
               <CheckCircle2 size={36} />
             </div>
 
-            <h2 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#fff', marginBottom: '0.75rem' }}>
+            <h2 style={{ fontSize: '1.85rem', fontWeight: 800, color: '#fff', marginBottom: '0.75rem' }}>
               Ticket Created Successfully
             </h2>
 
-            <p style={{ fontSize: '0.95rem', color: 'var(--text-muted)', lineHeight: '1.6', marginBottom: '1.75rem' }}>
-              Thank you for connecting with Partnex. Your query and call details have been recorded in our system.
-              Our admin team will review it and contact you on{' '}
+            <p style={{ fontSize: '1rem', color: 'var(--text-muted)', lineHeight: '1.6', marginBottom: '2rem' }}>
+              Thank you for connecting with Partnex. Your query and call details have been recorded.
+              Our admin team will contact you on{' '}
               <strong style={{ color: '#fff' }}>{phone}</strong> shortly.
             </p>
-
-            <div
-              style={{
-                backgroundColor: 'rgba(255, 255, 255, 0.02)',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: '16px',
-                padding: '1.25rem',
-                textAlign: 'left',
-                marginBottom: '2rem',
-                fontSize: '0.85rem',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Call Duration:</span>
-                <span style={{ fontWeight: 600, color: '#fff' }}>{formatTime(callDuration)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Status:</span>
-                <span style={{ fontWeight: 600, color: '#10b981' }}>Ticket Logged in SQLite</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Service:</span>
-                <span style={{ fontWeight: 600, color: 'var(--cf-orange)' }}>Partnex Software Dev</span>
-              </div>
-            </div>
 
             <button
               onClick={() => {
@@ -848,10 +700,10 @@ export default function CallingApp() {
                 backgroundColor: 'transparent',
                 border: '1px solid var(--border-active)',
                 color: 'var(--cf-orange)',
-                borderRadius: '14px',
-                padding: '0.9rem',
+                borderRadius: '16px',
+                padding: '1rem',
                 fontWeight: 700,
-                fontSize: '1rem',
+                fontSize: '1.05rem',
                 cursor: 'pointer',
               }}
             >
