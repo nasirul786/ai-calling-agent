@@ -1,18 +1,8 @@
 import WebSocket from 'ws';
 import { saveTicket } from './db.js';
 
-/**
- * System prompt strictly tailored for Partnex:
- * - Partnex is a premier software development service provider.
- * - We create every type of websites (custom portals, e-commerce, AI apps, SaaS, landing pages).
- * - Pricing can be seen on our website or discussed with our team member.
- * - Ask user what is their query/problem.
- * - Max 2 minutes call time.
- * - Tell them: "Got it! I have raised a ticket for your query, our admins/team will contact you shortly."
- * - When caller is satisfied or asks to end, call 'end_call' or 'raise_ticket'.
- */
 export const PARTNEX_SYSTEM_PROMPT = `
-You are the official AI Voice Support Assistant for "Partnex", a software development service provider.
+You are the official AI Voice Support Assistant for "Partnex", a premier software development service provider.
 Language: English (warm, polite, professional, conversational). If the user speaks Hindi, comfortably respond in polite Hindi/Hinglish.
 
 Company Knowledge:
@@ -26,10 +16,8 @@ Conversation Flow:
 2. Ask and listen carefully to what their query, requirement, or problem is.
 3. If they ask what websites we make: "We build all kinds of websites and web applications, from custom web portals and SaaS platforms to e-commerce and business sites."
 4. If they ask about cost/pricing: "Our pricing can be seen on our website, or you can discuss customized rates directly with our team member."
-5. As soon as the user states their query or requirement, invoke the tool 'raise_support_ticket' with their exact query summary.
-6. Then say clearly: "Got it! I have raised a ticket for your request. Our admin team will contact you shortly on your number. Have a wonderful day!"
-7. Once confirmed or when conversation reaches a natural close, execute the 'end_call' tool to hang up politely.
-8. Keep your sentences brief, punchy, and conversational.
+5. When the user states their query or requirement, summarize it, and say clearly: "Got it! I have noted your requirement and raised a ticket for you. Our admin team will contact you shortly on your number. Have a wonderful day!"
+6. Keep your spoken sentences brief, natural, and conversational for a voice phone conversation.
 `;
 
 const TOOLS = [
@@ -68,9 +56,11 @@ export function handleWebCallSession(clientWs, phone, callSid) {
   console.log(`\n🎙️ Starting Partnex Web Call for Phone: ${phone} (SID: ${callSid})`);
 
   const apiKey = process.env.OPENAI_API_KEY;
-  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
-  // Convert http(s) baseUrl to ws(s)
-  const wsBaseUrl = baseUrl.replace(/^http/, 'ws');
+  const rawBaseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
+  // Strip trailing slashes and trailing /v1 for WebSocket root construction
+  const cleanBase = rawBaseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+  const wsBaseUrl = cleanBase.replace(/^http/, 'ws');
+  const isDirectOpenAI = cleanBase.includes('openai.com');
   const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview';
 
   let callDurationSeconds = 0;
@@ -78,13 +68,15 @@ export function handleWebCallSession(clientWs, phone, callSid) {
   let fullTranscription = [];
   let isCallActive = true;
   let openAiWs = null;
+  let conversationHistory = [
+    { role: 'system', content: PARTNEX_SYSTEM_PROMPT }
+  ];
 
   // Track call duration timer (Max 2 minutes = 120 seconds)
   const timerInterval = setInterval(() => {
     if (!isCallActive) return;
     callDurationSeconds += 1;
 
-    // Send tick to client for visuals
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify({ type: 'timer', seconds: callDurationSeconds }));
     }
@@ -100,7 +92,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     isCallActive = false;
     clearInterval(timerInterval);
 
-    // Save ticket into SQLite database
     saveTicket({
       callSid,
       phone,
@@ -124,60 +115,132 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     }
   }
 
-  // If no OpenAI key is set, fallback to smart simulation mode so user can test UI & DB right away
-  if (!apiKey || apiKey === 'your_openai_api_key_here') {
-    console.warn('⚠️ No OPENAI_API_KEY provided. Running in Demo Simulation Mode for Partnex.');
-    
-    // Send simulated welcoming audio/speech event
+  // --- REST FALLBACK (for AIMLAPI, OpenRouter, or other REST-only providers) ---
+  function startRestVoiceAgent() {
+    console.log('🤖 Running Universal Chat Voice Mode for Partnex');
+
+    // Send initial spoken greeting to caller
+    const greeting = "Hello, thank you for calling Partnex! How can I help you with your software development project today?";
+    fullTranscription.push(`Assistant: ${greeting}`);
+
     setTimeout(() => {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify({
-          type: 'assistant_speech_start'
-        }));
-        clientWs.send(JSON.stringify({
           type: 'transcript',
           role: 'assistant',
-          text: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"
+          text: greeting,
+          speak: true
         }));
-        fullTranscription.push("Assistant: Hello! Thank you for calling Partnex. How can I help you with your software development project today?");
       }
-    }, 1200);
+    }, 600);
 
-    // Listen to client messages
-    clientWs.on('message', (data) => {
+    // Listen to user queries / transcripts from client
+    clientWs.on('message', async (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.type === 'user_query') {
-          userQuery = msg.text;
-          fullTranscription.push(`User: ${msg.text}`);
-          
-          setTimeout(() => {
-            const reply = "Got it! We build all types of websites and web applications. I have raised a ticket for your request, and our admin team will contact you shortly on your number.";
-            fullTranscription.push(`Assistant: ${reply}`);
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ type: 'transcript', role: 'assistant', text: reply }));
+
+        if (msg.type === 'user_query' && msg.text) {
+          const userText = msg.text.trim();
+          console.log(`👤 User said: "${userText}"`);
+          fullTranscription.push(`User: ${userText}`);
+          conversationHistory.push({ role: 'user', content: userText });
+
+          if (!userQuery) userQuery = userText;
+
+          // Call REST API
+          try {
+            const endpoint = `${rawBaseUrl.replace(/\/+$/, '')}/chat/completions`;
+            const chatRes = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: 'gpt-4o',
+                messages: conversationHistory,
+                max_tokens: 150,
+                temperature: 0.7
+              })
+            });
+
+            if (!chatRes.ok) {
+              const errTxt = await chatRes.text();
+              console.error('REST Chat error:', chatRes.status, errTxt);
+              return;
             }
-            setTimeout(() => {
-              endCallGracefully('Ticket raised & admin notified');
-            }, 5000);
-          }, 1500);
+
+            const chatData = await chatRes.json();
+            const reply = chatData.choices?.[0]?.message?.content || "Thank you for sharing. I have raised a ticket and our admin team will contact you shortly.";
+
+            conversationHistory.push({ role: 'assistant', content: reply });
+            fullTranscription.push(`Assistant: ${reply}`);
+
+            // If user mentioned their problem or inquiry, log ticket
+            if (fullTranscription.length >= 2) {
+              saveTicket({
+                callSid,
+                phone,
+                status: 'ticket_raised',
+                durationSeconds: callDurationSeconds,
+                query: userQuery,
+                transcription: fullTranscription.join('\n')
+              });
+            }
+
+            // Send spoken reply to client
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({
+                type: 'transcript',
+                role: 'assistant',
+                text: reply,
+                speak: true
+              }));
+            }
+
+            // Check if call should conclude
+            if (reply.toLowerCase().includes('raised a ticket') || reply.toLowerCase().includes('contact you shortly')) {
+              setTimeout(() => {
+                endCallGracefully('Ticket logged & admin notified');
+              }, 6000);
+            }
+
+          } catch (apiErr) {
+            console.error('Error calling REST endpoint:', apiErr);
+          }
+
         } else if (msg.type === 'hangup') {
-          endCallGracefully('User ended call');
+          endCallGracefully('User hung up');
         }
       } catch (err) {
-        console.error('Error in mock session:', err);
+        console.error('Error handling client message:', err);
       }
     });
 
     clientWs.on('close', () => {
-      endCallGracefully('Client closed tab');
+      endCallGracefully('Client closed call');
     });
+  }
 
+  // If no OpenAI key is set, run simulated demo
+  if (!apiKey || apiKey === 'your_openai_api_key_here') {
+    console.warn('⚠️ No OPENAI_API_KEY provided. Running in Demo Simulation Mode for Partnex.');
+    startRestVoiceAgent();
     return;
   }
 
-  // Live OpenAI Realtime WebSocket connection
-  openAiWs = new WebSocket(`${wsBaseUrl}/v1/realtime?model=${model}`, {
+  // If using AIMLAPI or other REST provider (which returns 404 for realtime websocket)
+  if (!isDirectOpenAI) {
+    console.log(`ℹ️ Non-OpenAI Base URL detected (${rawBaseUrl}). Using REST + Browser Speech Synthesis Voice Mode.`);
+    startRestVoiceAgent();
+    return;
+  }
+
+  // --- NATIVE OPENAI REALTIME WEBSOCKET ---
+  const wsUrl = `${wsBaseUrl}/v1/realtime?model=${model}`;
+  console.log(`Connecting to OpenAI Realtime: ${wsUrl}`);
+
+  openAiWs = new WebSocket(wsUrl, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'OpenAI-Beta': 'realtime=v1',
@@ -187,7 +250,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
   openAiWs.on('open', () => {
     console.log('🤖 Connected to OpenAI Realtime for web caller');
 
-    // Configure Partnex session
     const sessionUpdate = {
       type: 'session.update',
       session: {
@@ -211,7 +273,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     };
     openAiWs.send(JSON.stringify(sessionUpdate));
 
-    // Prompt the AI to initiate greeting
     openAiWs.send(JSON.stringify({
       type: 'response.create',
       response: {
@@ -224,17 +285,15 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     try {
       const event = JSON.parse(raw.toString());
 
-      // Audio stream from OpenAI -> send to Browser
       if (event.type === 'response.audio.delta' && event.delta) {
         if (clientWs.readyState === WebSocket.OPEN) {
           clientWs.send(JSON.stringify({
             type: 'audio_delta',
-            delta: event.delta // base64 pcm16
+            delta: event.delta
           }));
         }
       }
 
-      // Live transcript from AI
       if (event.type === 'response.audio_transcript.delta' && event.delta) {
         if (clientWs.readyState === WebSocket.OPEN) {
           clientWs.send(JSON.stringify({
@@ -245,7 +304,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
         }
       }
 
-      // User transcript from Whisper
       if (event.type === 'conversation.item.input_audio_transcription.completed') {
         const text = event.transcript || '';
         if (text) {
@@ -261,7 +319,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
         }
       }
 
-      // Function execution
       if (event.type === 'response.function_call_arguments.done') {
         const name = event.name;
         const callId = event.call_id;
@@ -279,7 +336,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
             transcription: fullTranscription.join('\n')
           });
 
-          // Confirm function result back to OpenAI
           openAiWs.send(JSON.stringify({
             type: 'conversation.item.create',
             item: {
@@ -300,7 +356,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
         }
       }
 
-      // Speech interruption
       if (event.type === 'input_audio_buffer.speech_started') {
         if (clientWs.readyState === WebSocket.OPEN) {
           clientWs.send(JSON.stringify({ type: 'interrupt' }));
@@ -311,16 +366,21 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     }
   });
 
-  // Handle audio coming from client browser microphone
+  openAiWs.on('error', (err) => {
+    console.error('OpenAI WebSocket error:', err.message);
+    // Fallback to REST voice agent if WebSocket rejected
+    startRestVoiceAgent();
+  });
+
   clientWs.on('message', (message) => {
     try {
       const msg = JSON.parse(message.toString());
 
       if (msg.type === 'audio_chunk' && msg.data) {
-        if (openAiWs.readyState === WebSocket.OPEN) {
+        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
           openAiWs.send(JSON.stringify({
             type: 'input_audio_buffer.append',
-            audio: msg.data // base64 pcm16
+            audio: msg.data
           }));
         }
       } else if (msg.type === 'hangup') {
@@ -333,9 +393,5 @@ export function handleWebCallSession(clientWs, phone, callSid) {
 
   clientWs.on('close', () => {
     endCallGracefully('Caller disconnected');
-  });
-
-  openAiWs.on('error', (err) => {
-    console.error('OpenAI WebSocket error:', err.message);
   });
 }

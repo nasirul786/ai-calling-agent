@@ -25,6 +25,7 @@ export default function CallingApp() {
   const processorRef = useRef(null);
   const audioQueueRef = useRef([]);
   const isPlayingAudioRef = useRef(false);
+  const recognitionRef = useRef(null);
 
   // 1. Immediately request Microphone Permission when user visits the page
   useEffect(() => {
@@ -39,7 +40,6 @@ export default function CallingApp() {
               noiseSuppression: true,
             },
           });
-          // Cache the stream so the call can connect immediately without re-prompting
           mediaStreamRef.current = stream;
         }
       } catch (err) {
@@ -108,6 +108,43 @@ export default function CallingApp() {
     return () => cancelAnimationFrame(animId);
   }, [step, aiIsSpeaking]);
 
+  // Speak text using SpeechSynthesis (browser native, crisp, zero lag)
+  const speakText = (text) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    // Pick warm voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => (v.name.includes('Natural') || v.name.includes('Google') || v.lang.startsWith('en')));
+    if (preferredVoice) utterance.voice = preferredVoice;
+
+    utterance.onstart = () => {
+      setAiIsSpeaking(true);
+      // Temporarily pause speech recognition while AI speaks to avoid hearing itself
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch (e) {}
+      }
+    };
+
+    utterance.onend = () => {
+      setAiIsSpeaking(false);
+      // Resume listening
+      if (recognitionRef.current) {
+        try { recognitionRef.current.start(); } catch (e) {}
+      }
+    };
+
+    utterance.onerror = () => {
+      setAiIsSpeaking(false);
+    };
+
+    window.speechSynthesis.speak(utterance);
+  };
+
   // Convert Float32 audio buffer to PCM16
   const floatTo16BitPCM = (float32Array) => {
     const buffer = new ArrayBuffer(float32Array.length * 2);
@@ -120,7 +157,7 @@ export default function CallingApp() {
     return buffer;
   };
 
-  // Play incoming PCM16 audio delta from OpenAI
+  // Play incoming PCM16 audio delta from OpenAI Realtime
   const playAudioChunk = async (base64Audio) => {
     if (!audioContextRef.current) return;
     try {
@@ -159,7 +196,7 @@ export default function CallingApp() {
     }
   };
 
-  // Live Call Initiation (WebSockets + Web Audio API)
+  // Live Call Initiation (WebSockets + Speech Recognition & Audio streaming)
   const initiateLiveCall = async (fullPhone) => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/call-stream?phone=${encodeURIComponent(fullPhone)}`;
@@ -173,7 +210,10 @@ export default function CallingApp() {
         const audioCtx = new AudioContext({ sampleRate: 24000 });
         audioContextRef.current = audioCtx;
 
-        // Ensure user media stream is ready
+        if (audioCtx.state === 'suspended') {
+          await audioCtx.resume();
+        }
+
         let stream = mediaStreamRef.current;
         if (!stream || !stream.active) {
           stream = await navigator.mediaDevices.getUserMedia({
@@ -204,6 +244,42 @@ export default function CallingApp() {
 
         source.connect(processor);
         processor.connect(audioCtx.destination);
+
+        // Also setup continuous speech recognition for universal compatibility
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+          const recognition = new SpeechRecognition();
+          recognition.continuous = true;
+          recognition.interimResults = false;
+          recognition.lang = 'en-US';
+
+          recognition.onresult = (event) => {
+            const lastResult = event.results[event.results.length - 1];
+            if (lastResult.isFinal) {
+              const transcript = lastResult[0].transcript.trim();
+              if (transcript && ws.readyState === WebSocket.OPEN) {
+                setLiveTranscript(`You: "${transcript}"`);
+                ws.send(JSON.stringify({ type: 'user_query', text: transcript }));
+              }
+            }
+          };
+
+          recognition.onerror = (e) => {
+            console.log('Speech recognition notice:', e.error);
+          };
+
+          recognition.onend = () => {
+            // Keep listening if call is active and AI is not speaking
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              try { recognition.start(); } catch (err) {}
+            }
+          };
+
+          try {
+            recognition.start();
+            recognitionRef.current = recognition;
+          } catch (e) {}
+        }
       } catch (err) {
         console.warn('Microphone initialization warning:', err);
       }
@@ -223,6 +299,9 @@ export default function CallingApp() {
 
         if (data.type === 'transcript') {
           setLiveTranscript(data.text);
+          if (data.speak && data.role === 'assistant') {
+            speakText(data.text);
+          }
         }
 
         if (data.type === 'audio_delta') {
@@ -238,6 +317,7 @@ export default function CallingApp() {
 
         if (data.type === 'interrupt') {
           audioQueueRef.current = [];
+          if (window.speechSynthesis) window.speechSynthesis.cancel();
           setAiIsSpeaking(false);
         }
 
@@ -268,7 +348,6 @@ export default function CallingApp() {
     setVerifying(true);
 
     try {
-      // Verify Cloudflare Turnstile token via backend
       const res = await fetch('/api/verify-turnstile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -285,7 +364,6 @@ export default function CallingApp() {
         return;
       }
 
-      // Transition to in-call & immediately connect WebSocket
       setStep('in_call');
       initiateLiveCall(cleanNum);
     } catch (err) {
@@ -297,6 +375,12 @@ export default function CallingApp() {
   };
 
   const handleEndCall = (sendHangup = true) => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.abort(); } catch (e) {}
+    }
     if (sendHangup && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'hangup' }));
       wsRef.current.close();
