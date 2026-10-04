@@ -13,7 +13,6 @@ export default function CallingApp() {
 
   // Call status
   const [callDuration, setCallDuration] = useState(0);
-  const [callState, setCallState] = useState('connecting'); // 'connecting' | 'talking' | 'listening' | 'ended'
   const [audioLevel, setAudioLevel] = useState(0.2);
   const [liveTranscript, setLiveTranscript] = useState('');
   const [aiIsSpeaking, setAiIsSpeaking] = useState(false);
@@ -27,7 +26,30 @@ export default function CallingApp() {
   const audioQueueRef = useRef([]);
   const isPlayingAudioRef = useRef(false);
 
-  // Initialize Cloudflare Turnstile
+  // 1. Immediately request Microphone Permission when user visits the page
+  useEffect(() => {
+    const requestMic = async () => {
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 24000,
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+          // Cache the stream so the call can connect immediately without re-prompting
+          mediaStreamRef.current = stream;
+        }
+      } catch (err) {
+        console.warn('Microphone permission dismissed or not allowed yet:', err);
+      }
+    };
+    requestMic();
+  }, []);
+
+  // 2. Initialize Cloudflare Turnstile
   useEffect(() => {
     if (step !== 'phone_entry') return;
 
@@ -86,48 +108,6 @@ export default function CallingApp() {
     return () => cancelAnimationFrame(animId);
   }, [step, aiIsSpeaking]);
 
-  // Phone submission & verification
-  const handleStartCall = async (e) => {
-    e.preventDefault();
-    setErrorMessage('');
-
-    const cleanNum = phone.trim();
-    if (!cleanNum || cleanNum.replace(/\D/g, '').length < 7) {
-      setErrorMessage('Please enter a valid phone number.');
-      return;
-    }
-
-    setVerifying(true);
-
-    try {
-      // Verify Cloudflare Turnstile token via backend
-      const res = await fetch('/api/verify-turnstile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: turnstileToken || 'XXXX.DUMMY.TOKEN.XXXX',
-          phone: cleanNum,
-        }),
-      });
-
-      const data = await res.json();
-      if (!data.success) {
-        setErrorMessage(data.error || 'Bot verification check failed.');
-        setVerifying(false);
-        return;
-      }
-
-      // Verification passed -> initiate call
-      setStep('in_call');
-      initiateLiveCall(cleanNum);
-    } catch (err) {
-      console.error(err);
-      setErrorMessage('Unable to connect. Please check connection and try again.');
-    } finally {
-      setVerifying(false);
-    }
-  };
-
   // Convert Float32 audio buffer to PCM16
   const floatTo16BitPCM = (float32Array) => {
     const buffer = new ArrayBuffer(float32Array.length * 2);
@@ -181,8 +161,6 @@ export default function CallingApp() {
 
   // Live Call Initiation (WebSockets + Web Audio API)
   const initiateLiveCall = async (fullPhone) => {
-    setCallState('connecting');
-
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/call-stream?phone=${encodeURIComponent(fullPhone)}`;
 
@@ -190,21 +168,24 @@ export default function CallingApp() {
     wsRef.current = ws;
 
     ws.onopen = async () => {
-      setCallState('talking');
       try {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         const audioCtx = new AudioContext({ sampleRate: 24000 });
         audioContextRef.current = audioCtx;
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 24000,
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
-        });
-        mediaStreamRef.current = stream;
+        // Ensure user media stream is ready
+        let stream = mediaStreamRef.current;
+        if (!stream || !stream.active) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 24000,
+              echoCancellation: true,
+              noiseSuppression: true,
+            },
+          });
+          mediaStreamRef.current = stream;
+        }
 
         const source = audioCtx.createMediaStreamSource(stream);
         const processor = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -224,7 +205,7 @@ export default function CallingApp() {
         source.connect(processor);
         processor.connect(audioCtx.destination);
       } catch (err) {
-        console.warn('Microphone permission not granted or unsupported:', err);
+        console.warn('Microphone initialization warning:', err);
       }
     };
 
@@ -273,6 +254,48 @@ export default function CallingApp() {
     };
   };
 
+  // Phone submission & verification
+  const handleStartCall = async (e) => {
+    e.preventDefault();
+    setErrorMessage('');
+
+    const cleanNum = phone.trim();
+    if (!cleanNum || cleanNum.replace(/\D/g, '').length < 7) {
+      setErrorMessage('Please enter a valid phone number.');
+      return;
+    }
+
+    setVerifying(true);
+
+    try {
+      // Verify Cloudflare Turnstile token via backend
+      const res = await fetch('/api/verify-turnstile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: turnstileToken || 'XXXX.DUMMY.TOKEN.XXXX',
+          phone: cleanNum,
+        }),
+      });
+
+      const data = await res.json();
+      if (!data.success) {
+        setErrorMessage(data.error || 'Bot verification check failed.');
+        setVerifying(false);
+        return;
+      }
+
+      // Transition to in-call & immediately connect WebSocket
+      setStep('in_call');
+      initiateLiveCall(cleanNum);
+    } catch (err) {
+      console.error(err);
+      setErrorMessage('Unable to connect. Please check connection and try again.');
+    } finally {
+      setVerifying(false);
+    }
+  };
+
   const handleEndCall = (sendHangup = true) => {
     if (sendHangup && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'hangup' }));
@@ -289,7 +312,6 @@ export default function CallingApp() {
       audioContextRef.current.close().catch(() => {});
     }
 
-    setCallState('ended');
     setStep('call_summary');
   };
 
@@ -301,7 +323,7 @@ export default function CallingApp() {
 
   return (
     <main style={{ minHeight: '100vh', minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
-      {/* STEP 1: ULTRA-CLEAN PHONE ENTRY (NO HEADER, NO CARD, NO COUNTRY SELECTOR) */}
+      {/* STEP 1: ULTRA-SIMPLE PHONE ENTRY (PROMPTS MIC ON LOAD) */}
       {step === 'phone_entry' && (
         <section
           style={{
@@ -363,7 +385,7 @@ export default function CallingApp() {
                 id="phone-input"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder="Enter phone number"
+                placeholder="With country code"
                 style={{
                   width: '100%',
                   background: 'transparent',
