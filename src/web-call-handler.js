@@ -77,6 +77,7 @@ export function handleWebCallSession(clientWs, phone, callSid) {
   let userQuery = '';
   let fullTranscription = [];
   let isCallActive = true;
+  let openAiWs = null;
 
   // Track call duration timer (Max 2 minutes = 120 seconds)
   const timerInterval = setInterval(() => {
@@ -176,7 +177,7 @@ export function handleWebCallSession(clientWs, phone, callSid) {
   }
 
   // Live OpenAI Realtime WebSocket connection
-  const openAiWs = new WebSocket(`${wsBaseUrl}/v1/realtime?model=${model}`, {
+  openAiWs = new WebSocket(`${wsBaseUrl}/v1/realtime?model=${model}`, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'OpenAI-Beta': 'realtime=v1',
