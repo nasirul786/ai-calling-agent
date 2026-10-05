@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, MediaResolution } from '@google/genai';
 import { saveTicket } from './db.js';
 
 export const PARTNEX_SYSTEM_PROMPT = `
@@ -17,8 +17,8 @@ Conversation Flow:
 2. Ask and listen carefully to what their query, requirement, or problem is.
 3. If they ask what websites we make: "We build all kinds of websites and web applications, from custom web portals and SaaS platforms to e-commerce and business sites."
 4. If they ask about cost/pricing: "Our pricing can be seen on our website, or you can discuss customized rates directly with our team member."
-5. When the user states their query or requirement, summarize it, and say clearly: "Got it! I have noted your requirement and raised a ticket for you. Our admin team will contact you shortly on your number. Have a wonderful day!"
-6. Keep your spoken sentences brief, natural, and conversational for a voice phone conversation.
+5. When the user explains their query or requirement, acknowledge it politely, and say clearly: "Got it! I have noted your requirement and raised a ticket for you. Our admin team will contact you shortly on your number. Have a wonderful day!"
+6. Keep spoken sentences brief, natural, and conversational for a live phone conversation.
 `;
 
 export function handleWebCallSession(clientWs, phone, callSid) {
@@ -29,7 +29,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
   let fullTranscription = [];
   let isCallActive = true;
   let geminiSession = null;
-  let openAiWs = null;
 
   // Track call duration timer (Max 2 minutes = 120 seconds)
   const timerInterval = setInterval(() => {
@@ -70,17 +69,17 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     }
 
     if (geminiSession) {
-      try { geminiSession.close(); } catch (e) {}
-    }
-
-    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-      try { openAiWs.close(); } catch (e) {}
+      try {
+        geminiSession.close();
+      } catch (e) {
+        console.error('Error closing Gemini session:', e);
+      }
     }
   }
 
-  // --- REST / SIMULATION FALLBACK ---
-  function startRestVoiceAgent() {
-    console.log('🤖 Running Universal Chat Voice Mode for Partnex');
+  // Fallback demo mode if no GEMINI_API_KEY is configured
+  function startSimulationMode() {
+    console.warn('⚠️ No valid GEMINI_API_KEY found. Running in demo simulation mode for Partnex.');
 
     const greeting = "Hello, thank you for calling Partnex! How can I help you with your software development project today?";
     fullTranscription.push(`Assistant: ${greeting}`);
@@ -99,32 +98,12 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     clientWs.on('message', async (data) => {
       try {
         const msg = JSON.parse(data.toString());
-
         if (msg.type === 'user_query' && msg.text) {
           const userText = msg.text.trim();
-          console.log(`👤 User said: "${userText}"`);
           fullTranscription.push(`User: ${userText}`);
           if (!userQuery) userQuery = userText;
 
-          // If Gemini API key is present, use Gemini generateContent
-          const geminiKey = process.env.GEMINI_API_KEY;
-          let reply = "Got it! We build all types of websites and web applications. I have raised a ticket for your request, and our admin team will contact you shortly.";
-
-          if (geminiKey && geminiKey !== 'your_gemini_api_key_here') {
-            try {
-              const ai = new GoogleGenAI({ apiKey: geminiKey });
-              const res = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: [
-                  { role: 'user', parts: [{ text: `${PARTNEX_SYSTEM_PROMPT}\n\nUser: ${userText}\nAssistant:` }] }
-                ]
-              });
-              reply = res.text || reply;
-            } catch (err) {
-              console.warn('Gemini generateContent fallback error:', err.message);
-            }
-          }
-
+          const reply = "Got it! We build all types of websites and web applications. I have raised a ticket for your request, and our admin team will contact you shortly.";
           fullTranscription.push(`Assistant: ${reply}`);
 
           saveTicket({
@@ -145,16 +124,14 @@ export function handleWebCallSession(clientWs, phone, callSid) {
             }));
           }
 
-          if (reply.toLowerCase().includes('raised a ticket') || reply.toLowerCase().includes('contact you shortly')) {
-            setTimeout(() => {
-              endCallGracefully('Ticket logged & admin notified');
-            }, 6000);
-          }
+          setTimeout(() => {
+            endCallGracefully('Ticket logged & admin notified');
+          }, 6000);
         } else if (msg.type === 'hangup') {
           endCallGracefully('User hung up');
         }
       } catch (err) {
-        console.error('Error handling client message:', err);
+        console.error('Simulation error:', err);
       }
     });
 
@@ -163,61 +140,78 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     });
   }
 
-  // --- GEMINI LIVE API INTEGRATION ---
-  async function startGeminiLiveSession(geminiKey) {
-    console.log('🤖 Connecting to Gemini Live API with @google/genai...');
+  // Connect to Google Gemini 3.8 Live API
+  async function startGemini38Live(geminiKey) {
+    const rawModel = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
+    const model = rawModel.startsWith('models/') ? rawModel : `models/${rawModel}`;
+    const voiceName = process.env.GEMINI_VOICE_NAME || 'Autonoe';
+
+    console.log(`🤖 Connecting to Google Gemini Live API...`);
+    console.log(`📡 Model: ${model}`);
+    console.log(`🗣️ Voice: ${voiceName}`);
+
     try {
       const ai = new GoogleGenAI({ apiKey: geminiKey });
-      const model = process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp';
 
-      geminiSession = await ai.live.connect({
-        model,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction: {
-            parts: [{ text: PARTNEX_SYSTEM_PROMPT }]
-          },
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: 'Aoede' // Warm, professional voice
-              }
+      const config = {
+        responseModalities: [Modality.AUDIO],
+        mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: voiceName,
             }
           }
         },
+        contextWindowCompression: {
+          triggerTokens: '104857',
+          slidingWindow: { targetTokens: '52428' },
+        },
+        systemInstruction: {
+          parts: [{ text: PARTNEX_SYSTEM_PROMPT }]
+        }
+      };
+
+      geminiSession = await ai.live.connect({
+        model,
         callbacks: {
-          onopen: () => {
-            console.log('✅ Connected to Google Gemini Live API');
-            // Send initial prompt turn to trigger greeting
+          onopen: function () {
+            console.log('✅ Connected to Google Gemini 3.8 Live API');
+
+            // Send initial trigger to produce greeting voice
             try {
               geminiSession.sendClientContent({
                 turns: [
                   {
                     role: 'user',
-                    parts: [{ text: 'Greet the caller warmly by saying: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"' }]
+                    parts: [{
+                      text: 'Greet the caller warmly by saying: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"'
+                    }]
                   }
                 ],
                 turnComplete: true
               });
-            } catch (e) {
-              console.error('Error sending initial turn to Gemini:', e);
+            } catch (err) {
+              console.error('Error triggering initial greeting:', err);
             }
           },
-          onmessage: (message) => {
+          onmessage: function (message) {
             try {
-              // Extract model turn content
               const parts = message.serverContent?.modelTurn?.parts || [];
+
               for (const part of parts) {
-                // If audio data returned by Gemini Live
+                // Audio data from Gemini Live
                 if (part.inlineData && part.inlineData.data) {
                   if (clientWs.readyState === WebSocket.OPEN) {
                     clientWs.send(JSON.stringify({
                       type: 'audio_delta',
-                      delta: part.inlineData.data // base64 PCM audio chunk
+                      delta: part.inlineData.data, // base64 PCM / audio chunk
+                      mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000'
                     }));
                   }
                 }
-                // If text transcript returned by Gemini
+
+                // Text transcript from Gemini
                 if (part.text) {
                   fullTranscription.push(`Assistant: ${part.text}`);
                   if (clientWs.readyState === WebSocket.OPEN) {
@@ -228,30 +222,43 @@ export function handleWebCallSession(clientWs, phone, callSid) {
                       speak: true
                     }));
                   }
+
+                  // Auto ticket creation if ticket raised
+                  if (part.text.toLowerCase().includes('raised a ticket') || part.text.toLowerCase().includes('contact you shortly')) {
+                    saveTicket({
+                      callSid,
+                      phone,
+                      status: 'ticket_raised',
+                      durationSeconds: callDurationSeconds,
+                      query: userQuery || 'Software development inquiry',
+                      transcription: fullTranscription.join('\n')
+                    });
+                  }
                 }
               }
 
-              // Handle interruption signal from Gemini
+              // Interruption signal from Gemini VAD
               if (message.serverContent?.interrupted) {
                 if (clientWs.readyState === WebSocket.OPEN) {
                   clientWs.send(JSON.stringify({ type: 'interrupt' }));
                 }
               }
             } catch (err) {
-              console.error('Error in Gemini Live message callback:', err);
+              console.error('Error processing Gemini Live message:', err);
             }
           },
-          onerror: (e) => {
-            console.error('❌ Gemini Live WebSocket error:', e?.message || e);
-            startRestVoiceAgent();
+          onerror: function (e) {
+            console.error('❌ Gemini Live Error:', e?.message || e);
+            startSimulationMode();
           },
-          onclose: (e) => {
-            console.log('Gemini Live session closed:', e?.reason || '');
+          onclose: function (e) {
+            console.log('Gemini Live session closed:', e?.reason || 'Done');
           }
-        }
+        },
+        config
       });
 
-      // Stream incoming browser microphone audio chunk directly into Gemini Live
+      // Handle audio and text messages from browser
       clientWs.on('message', (message) => {
         try {
           const msg = JSON.parse(message.toString());
@@ -261,7 +268,7 @@ export function handleWebCallSession(clientWs, phone, callSid) {
               geminiSession.sendRealtimeInput({
                 media: {
                   mimeType: 'audio/pcm;rate=24000',
-                  data: msg.data // base64 PCM16
+                  data: msg.data
                 }
               });
             }
@@ -280,7 +287,7 @@ export function handleWebCallSession(clientWs, phone, callSid) {
             endCallGracefully('User hung up');
           }
         } catch (e) {
-          console.error('Error handling client message in Gemini session:', e);
+          console.error('Error handling client message:', e);
         }
       });
 
@@ -289,20 +296,15 @@ export function handleWebCallSession(clientWs, phone, callSid) {
       });
 
     } catch (err) {
-      console.error('Failed to initialize Gemini Live session:', err.message);
-      startRestVoiceAgent();
+      console.error('Failed to connect to Gemini 3.8 Live API:', err.message);
+      startSimulationMode();
     }
   }
 
-  // --- DECIDE PROVIDER ---
   const geminiKey = process.env.GEMINI_API_KEY;
-  const aiProvider = process.env.AI_PROVIDER || 'gemini';
-
-  if (aiProvider === 'gemini' && geminiKey && geminiKey !== 'your_gemini_api_key_here') {
-    startGeminiLiveSession(geminiKey);
-    return;
+  if (geminiKey && geminiKey !== 'your_gemini_api_key_here') {
+    startGemini38Live(geminiKey);
+  } else {
+    startSimulationMode();
   }
-
-  // Otherwise, fallback to Rest / Simulation agent
-  startRestVoiceAgent();
 }

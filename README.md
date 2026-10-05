@@ -1,29 +1,28 @@
-# Web Call Agent (OpenAI Realtime API + SQLite + Next.js)
+# Web Call Agent (Google Gemini 3.8 Live API + SQLite + Next.js)
 
-A real-time AI Web Calling agent built with **Next.js 14**, **OpenAI Realtime API** (`gpt-4o-realtime-preview`), **Cloudflare Turnstile**, and a local **SQLite database** (`better-sqlite3`).
+A real-time AI Web Calling agent built with **Next.js 16**, **Google Gemini 3.8 Live API** (`models/gemini-3.8-live` with `Autonoe` voice), **Cloudflare Turnstile**, and a local **SQLite database** (`better-sqlite3`).
 
-Users can open the web link from any mobile browser or desktop, enter their phone number through a clean verification page, and immediately speak with the AI support assistant via low-latency bidirectional WebSockets.
+Users open the web call link from any mobile browser or desktop, enter their phone number on a clean page, and immediately speak with the Partnex AI support assistant in real time.
 
 ---
 
 ## Features
 
-- **Instant Web Voice Calling**: No telephony number or telecom paperwork required. Callers talk directly from their phone/desktop browser using Web Audio & WebSockets.
-- **Ultra-low Latency AI Speech**: Powered by OpenAI Realtime API (`gpt-4o-realtime-preview`) with customizable `OPENAI_BASE_URL`.
-- **Cloudflare Orange Themed UI**:
-  - **Phone Entry Screen**: Clean interface asking *"What is your phone number?"* with bot validation.
-  - **Live In-Call Screen**: Center pulsating, spinning audio visual sphere with real-time waveform beats.
-  - **Call Controls**: Top live timer with a strict **2-minute hard limit**, and a bottom **End Call** button.
-- **Partnex Support Assistant Knowledge**:
-  - Provides software development services support.
-  - Clarifies that Partnex creates **every type of website** (custom web portals, SaaS, e-commerce, AI integrations).
+- **Google Gemini 3.8 Live Voice**: Live bidirectional audio streaming using `@google/genai` Live API (`models/gemini-3.8-live`) with the **Autonoe** voice.
+- **Microphone Permissions Upfront**: Browser requests mic access upon page load and maintains an active audio stream for zero-delay calling.
+- **Ultra-Clean UI (Cloudflare Orange Theme)**:
+  - Simple phone entry asking: *"What is your phone number?"* (No extra cards or cluttered header banners).
+  - Center pulsing, spinning audio visual sphere with live waveform beats.
+  - Strict **2-minute hard cap** call timer and prominent **End Call** button.
+- **Partnex Support Knowledge**:
+  - Informs callers that Partnex creates **every type of website** (custom web portals, SaaS, e-commerce, AI web apps).
   - Clarifies that **pricing can be viewed on the website or discussed directly with a team member**.
-  - Collects caller query, logs a ticket, and states:
-    > *"Got it! I have raised a ticket for your request, our admins/team will contact you shortly."*
+  - Collects caller query, logs a ticket into SQLite, and announces:
+    > *"Got it! I have noted your requirement and raised a ticket for you. Our admin team will contact you shortly on your number. Have a wonderful day!"*
 - **SQLite Database Persistence**:
-  - Automatically records `phone`, `call_sid`, `status`, `duration_seconds`, `query`, and `transcription` into SQLite (`data/partnex_calls.db`).
-  - Database files are completely ignored in Git.
-- **Cloudflare Turnstile Bot Protection**: Integrates Cloudflare site key & secret key token verification.
+  - Stores `phone`, `call_sid`, `status`, `duration_seconds`, `query`, and `transcription` into `data/partnex_calls.db`.
+  - Database folder and files are completely ignored in Git.
+- **Cloudflare Turnstile**: Zero-friction bot protection verifying caller tokens prior to session initiation.
 
 ---
 
@@ -32,88 +31,69 @@ Users can open the web link from any mobile browser or desktop, enter their phon
 ```
 [User Browser (Mobile / Desktop)]
        │
-       │ 1. Phone number entered + Cloudflare Turnstile token verified
+       │ 1. Phone number entered + Cloudflare Turnstile token validated
        ▼
 [Next.js Server (:3000)]
        │
        │ 2. Initiates bi-directional audio WebSocket (/api/call-stream)
        ▼
-[OpenAI Realtime API (gpt-4o-realtime-preview)]
+[Google Gemini 3.8 Live API (models/gemini-3.8-live, Voice: Autonoe)]
        │
-       │ 3. Voice conversation & function calling (raise_support_ticket)
+       │ 3. Realtime voice dialogue & user requirement capture
        ▼
 [SQLite Database (partnex_calls.db)]
        │ (Saves: phone, duration, transcript, query)
        ▼
-[AI Response]: "Got it! I have raised a ticket. Our admin team will contact you."
+[Gemini Spoken Response]: "Got it! I have raised a ticket. Our admin team will contact you shortly."
 ```
-
----
-
-## Tech Stack
-
-- **Framework**: Next.js 14 (App Router) + React 18
-- **Backend / WebSockets**: Node.js + `ws`
-- **Database**: SQLite with `better-sqlite3` (WAL mode enabled)
-- **AI Voice**: OpenAI Realtime API (WebSocket audio streaming)
-- **Security**: Cloudflare Turnstile (`siteverify`)
-- **Icons & Styling**: Vanilla CSS + `lucide-react`
 
 ---
 
 ## Getting Started
 
-### 1. Clone the repository
-```bash
-git clone https://github.com/<your-username>/web-call-agent.git
-cd web-call-agent
-```
-
-### 2. Install dependencies
+### 1. Install Dependencies
 ```bash
 npm install
 ```
 
-### 3. Setup Environment Variables
+### 2. Configure Environment Variables
 Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
 
-Configure your `.env` values:
+Set your Google Gemini API key:
 ```ini
 PORT=3000
-SERVER_DOMAIN=localhost:3000
 
-# OpenAI Configuration
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_BASE_URL=https://api.openai.com
-OPENAI_REALTIME_MODEL=gpt-4o-realtime-preview
+# Google Gemini API Key from https://aistudio.google.com/app/apikey
+GEMINI_API_KEY=AIzaSy...your_gemini_api_key_here
+GEMINI_LIVE_MODEL=models/gemini-3.8-live
+GEMINI_VOICE_NAME=Autonoe
 
-# Cloudflare Turnstile
+# Cloudflare Turnstile (Pre-configured with test keys)
 NEXT_PUBLIC_CLOUDFLARE_SITE_KEY=1x00000000000000000000AA
 CLOUDFLARE_SECRET_KEY=1x0000000000000000000000000000000AA
 ```
-*(The default keys are Cloudflare's official testing keys which automatically pass for local development).*
 
-### 4. Run the development server
+### 3. Run the Server
 ```bash
 npm run dev
 ```
 
-Open **[http://localhost:3000](http://localhost:3000)** in your browser.
+Open **[http://localhost:3000](http://localhost:3000)** in your mobile or desktop browser.
 
 ---
 
 ## Checking Saved Tickets
 
-You can view recorded tickets anytime through the API:
+Fetch all recorded tickets anytime:
 ```bash
 curl http://localhost:3000/api/ticket
 ```
-Or run the automated test:
+Or run the automated database verification script:
 ```bash
-node test-api.js
+node test-db.js
 ```
 
 ---
