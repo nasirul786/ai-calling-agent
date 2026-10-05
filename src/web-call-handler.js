@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { GoogleGenAI, Modality } from '@google/genai';
 import { saveTicket } from './db.js';
 
 export const PARTNEX_SYSTEM_PROMPT = `
@@ -20,57 +21,15 @@ Conversation Flow:
 6. Keep your spoken sentences brief, natural, and conversational for a voice phone conversation.
 `;
 
-const TOOLS = [
-  {
-    type: "function",
-    name: "raise_support_ticket",
-    description: "Raise an internal support ticket in SQLite database with the user query.",
-    parameters: {
-      type: "object",
-      properties: {
-        query_summary: {
-          type: "string",
-          description: "Summary of the caller's software requirement, query, or problem"
-        }
-      },
-      required: ["query_summary"]
-    }
-  },
-  {
-    type: "function",
-    name: "end_call",
-    description: "End the active phone/web call gracefully.",
-    parameters: {
-      type: "object",
-      properties: {
-        reason: {
-          type: "string",
-          description: "Reason for ending call (e.g., ticket raised, caller satisfied, timeout)"
-        }
-      }
-    }
-  }
-];
-
 export function handleWebCallSession(clientWs, phone, callSid) {
   console.log(`\n🎙️ Starting Partnex Web Call for Phone: ${phone} (SID: ${callSid})`);
-
-  const apiKey = process.env.OPENAI_API_KEY;
-  const rawBaseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
-  // Strip trailing slashes and trailing /v1 for WebSocket root construction
-  const cleanBase = rawBaseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
-  const wsBaseUrl = cleanBase.replace(/^http/, 'ws');
-  const isDirectOpenAI = cleanBase.includes('openai.com');
-  const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview';
 
   let callDurationSeconds = 0;
   let userQuery = '';
   let fullTranscription = [];
   let isCallActive = true;
+  let geminiSession = null;
   let openAiWs = null;
-  let conversationHistory = [
-    { role: 'system', content: PARTNEX_SYSTEM_PROMPT }
-  ];
 
   // Track call duration timer (Max 2 minutes = 120 seconds)
   const timerInterval = setInterval(() => {
@@ -110,16 +69,19 @@ export function handleWebCallSession(clientWs, phone, callSid) {
       clientWs.close();
     }
 
+    if (geminiSession) {
+      try { geminiSession.close(); } catch (e) {}
+    }
+
     if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-      openAiWs.close();
+      try { openAiWs.close(); } catch (e) {}
     }
   }
 
-  // --- REST FALLBACK (for AIMLAPI, OpenRouter, or other REST-only providers) ---
+  // --- REST / SIMULATION FALLBACK ---
   function startRestVoiceAgent() {
     console.log('🤖 Running Universal Chat Voice Mode for Partnex');
 
-    // Send initial spoken greeting to caller
     const greeting = "Hello, thank you for calling Partnex! How can I help you with your software development project today?";
     fullTranscription.push(`Assistant: ${greeting}`);
 
@@ -134,7 +96,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
       }
     }, 600);
 
-    // Listen to user queries / transcripts from client
     clientWs.on('message', async (data) => {
       try {
         const msg = JSON.parse(data.toString());
@@ -143,72 +104,52 @@ export function handleWebCallSession(clientWs, phone, callSid) {
           const userText = msg.text.trim();
           console.log(`👤 User said: "${userText}"`);
           fullTranscription.push(`User: ${userText}`);
-          conversationHistory.push({ role: 'user', content: userText });
-
           if (!userQuery) userQuery = userText;
 
-          // Call REST API
-          try {
-            const endpoint = `${rawBaseUrl.replace(/\/+$/, '')}/chat/completions`;
-            const chatRes = await fetch(endpoint, {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                model: 'gpt-4o',
-                messages: conversationHistory,
-                max_tokens: 150,
-                temperature: 0.7
-              })
-            });
+          // If Gemini API key is present, use Gemini generateContent
+          const geminiKey = process.env.GEMINI_API_KEY;
+          let reply = "Got it! We build all types of websites and web applications. I have raised a ticket for your request, and our admin team will contact you shortly.";
 
-            if (!chatRes.ok) {
-              const errTxt = await chatRes.text();
-              console.error('REST Chat error:', chatRes.status, errTxt);
-              return;
-            }
-
-            const chatData = await chatRes.json();
-            const reply = chatData.choices?.[0]?.message?.content || "Thank you for sharing. I have raised a ticket and our admin team will contact you shortly.";
-
-            conversationHistory.push({ role: 'assistant', content: reply });
-            fullTranscription.push(`Assistant: ${reply}`);
-
-            // If user mentioned their problem or inquiry, log ticket
-            if (fullTranscription.length >= 2) {
-              saveTicket({
-                callSid,
-                phone,
-                status: 'ticket_raised',
-                durationSeconds: callDurationSeconds,
-                query: userQuery,
-                transcription: fullTranscription.join('\n')
+          if (geminiKey && geminiKey !== 'your_gemini_api_key_here') {
+            try {
+              const ai = new GoogleGenAI({ apiKey: geminiKey });
+              const res = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: [
+                  { role: 'user', parts: [{ text: `${PARTNEX_SYSTEM_PROMPT}\n\nUser: ${userText}\nAssistant:` }] }
+                ]
               });
+              reply = res.text || reply;
+            } catch (err) {
+              console.warn('Gemini generateContent fallback error:', err.message);
             }
-
-            // Send spoken reply to client
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({
-                type: 'transcript',
-                role: 'assistant',
-                text: reply,
-                speak: true
-              }));
-            }
-
-            // Check if call should conclude
-            if (reply.toLowerCase().includes('raised a ticket') || reply.toLowerCase().includes('contact you shortly')) {
-              setTimeout(() => {
-                endCallGracefully('Ticket logged & admin notified');
-              }, 6000);
-            }
-
-          } catch (apiErr) {
-            console.error('Error calling REST endpoint:', apiErr);
           }
 
+          fullTranscription.push(`Assistant: ${reply}`);
+
+          saveTicket({
+            callSid,
+            phone,
+            status: 'ticket_raised',
+            durationSeconds: callDurationSeconds,
+            query: userQuery,
+            transcription: fullTranscription.join('\n')
+          });
+
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({
+              type: 'transcript',
+              role: 'assistant',
+              text: reply,
+              speak: true
+            }));
+          }
+
+          if (reply.toLowerCase().includes('raised a ticket') || reply.toLowerCase().includes('contact you shortly')) {
+            setTimeout(() => {
+              endCallGracefully('Ticket logged & admin notified');
+            }, 6000);
+          }
         } else if (msg.type === 'hangup') {
           endCallGracefully('User hung up');
         }
@@ -222,176 +163,146 @@ export function handleWebCallSession(clientWs, phone, callSid) {
     });
   }
 
-  // If no OpenAI key is set, run simulated demo
-  if (!apiKey || apiKey === 'your_openai_api_key_here') {
-    console.warn('⚠️ No OPENAI_API_KEY provided. Running in Demo Simulation Mode for Partnex.');
-    startRestVoiceAgent();
-    return;
-  }
-
-  // If using AIMLAPI or other REST provider (which returns 404 for realtime websocket)
-  if (!isDirectOpenAI) {
-    console.log(`ℹ️ Non-OpenAI Base URL detected (${rawBaseUrl}). Using REST + Browser Speech Synthesis Voice Mode.`);
-    startRestVoiceAgent();
-    return;
-  }
-
-  // --- NATIVE OPENAI REALTIME WEBSOCKET ---
-  const wsUrl = `${wsBaseUrl}/v1/realtime?model=${model}`;
-  console.log(`Connecting to OpenAI Realtime: ${wsUrl}`);
-
-  openAiWs = new WebSocket(wsUrl, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'OpenAI-Beta': 'realtime=v1',
-    },
-  });
-
-  openAiWs.on('open', () => {
-    console.log('🤖 Connected to OpenAI Realtime for web caller');
-
-    const sessionUpdate = {
-      type: 'session.update',
-      session: {
-        modalities: ['audio', 'text'],
-        instructions: PARTNEX_SYSTEM_PROMPT,
-        voice: 'alloy',
-        input_audio_format: 'pcm16',
-        output_audio_format: 'pcm16',
-        input_audio_transcription: {
-          model: 'whisper-1'
-        },
-        turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500
-        },
-        tools: TOOLS,
-        tool_choice: 'auto',
-      },
-    };
-    openAiWs.send(JSON.stringify(sessionUpdate));
-
-    openAiWs.send(JSON.stringify({
-      type: 'response.create',
-      response: {
-        instructions: 'Greet the caller warmly by saying: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"'
-      }
-    }));
-  });
-
-  openAiWs.on('message', (raw) => {
+  // --- GEMINI LIVE API INTEGRATION ---
+  async function startGeminiLiveSession(geminiKey) {
+    console.log('🤖 Connecting to Gemini Live API with @google/genai...');
     try {
-      const event = JSON.parse(raw.toString());
+      const ai = new GoogleGenAI({ apiKey: geminiKey });
+      const model = process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp';
 
-      if (event.type === 'response.audio.delta' && event.delta) {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify({
-            type: 'audio_delta',
-            delta: event.delta
-          }));
-        }
-      }
+      geminiSession = await ai.live.connect({
+        model,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          systemInstruction: {
+            parts: [{ text: PARTNEX_SYSTEM_PROMPT }]
+          },
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: 'Aoede' // Warm, professional voice
+              }
+            }
+          }
+        },
+        callbacks: {
+          onopen: () => {
+            console.log('✅ Connected to Google Gemini Live API');
+            // Send initial prompt turn to trigger greeting
+            try {
+              geminiSession.sendClientContent({
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [{ text: 'Greet the caller warmly by saying: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"' }]
+                  }
+                ],
+                turnComplete: true
+              });
+            } catch (e) {
+              console.error('Error sending initial turn to Gemini:', e);
+            }
+          },
+          onmessage: (message) => {
+            try {
+              // Extract model turn content
+              const parts = message.serverContent?.modelTurn?.parts || [];
+              for (const part of parts) {
+                // If audio data returned by Gemini Live
+                if (part.inlineData && part.inlineData.data) {
+                  if (clientWs.readyState === WebSocket.OPEN) {
+                    clientWs.send(JSON.stringify({
+                      type: 'audio_delta',
+                      delta: part.inlineData.data // base64 PCM audio chunk
+                    }));
+                  }
+                }
+                // If text transcript returned by Gemini
+                if (part.text) {
+                  fullTranscription.push(`Assistant: ${part.text}`);
+                  if (clientWs.readyState === WebSocket.OPEN) {
+                    clientWs.send(JSON.stringify({
+                      type: 'transcript',
+                      role: 'assistant',
+                      text: part.text,
+                      speak: true
+                    }));
+                  }
+                }
+              }
 
-      if (event.type === 'response.audio_transcript.delta' && event.delta) {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify({
-            type: 'transcript_delta',
-            role: 'assistant',
-            delta: event.delta
-          }));
-        }
-      }
-
-      if (event.type === 'conversation.item.input_audio_transcription.completed') {
-        const text = event.transcript || '';
-        if (text) {
-          fullTranscription.push(`User: ${text}`);
-          if (!userQuery) userQuery = text;
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({
-              type: 'transcript',
-              role: 'user',
-              text
-            }));
+              // Handle interruption signal from Gemini
+              if (message.serverContent?.interrupted) {
+                if (clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.send(JSON.stringify({ type: 'interrupt' }));
+                }
+              }
+            } catch (err) {
+              console.error('Error in Gemini Live message callback:', err);
+            }
+          },
+          onerror: (e) => {
+            console.error('❌ Gemini Live WebSocket error:', e?.message || e);
+            startRestVoiceAgent();
+          },
+          onclose: (e) => {
+            console.log('Gemini Live session closed:', e?.reason || '');
           }
         }
-      }
+      });
 
-      if (event.type === 'response.function_call_arguments.done') {
-        const name = event.name;
-        const callId = event.call_id;
-        const args = JSON.parse(event.arguments || '{}');
+      // Stream incoming browser microphone audio chunk directly into Gemini Live
+      clientWs.on('message', (message) => {
+        try {
+          const msg = JSON.parse(message.toString());
 
-        if (name === 'raise_support_ticket') {
-          userQuery = args.query_summary || userQuery;
-          console.log(`🎫 [PARTNEX TICKET CREATED]: "${userQuery}" for phone: ${phone}`);
-          saveTicket({
-            callSid,
-            phone,
-            status: 'ticket_raised',
-            durationSeconds: callDurationSeconds,
-            query: userQuery,
-            transcription: fullTranscription.join('\n')
-          });
-
-          openAiWs.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: callId,
-              output: JSON.stringify({
-                status: 'success',
-                message: 'Ticket successfully logged in Partnex database. Admin team notified.'
-              })
+          if (msg.type === 'audio_chunk' && msg.data) {
+            if (geminiSession) {
+              geminiSession.sendRealtimeInput({
+                media: {
+                  mimeType: 'audio/pcm;rate=24000',
+                  data: msg.data // base64 PCM16
+                }
+              });
             }
-          }));
-          openAiWs.send(JSON.stringify({ type: 'response.create' }));
-        } else if (name === 'end_call') {
-          console.log(`📞 AI requested call termination: ${args.reason || 'Normal'}`);
-          setTimeout(() => {
-            endCallGracefully(args.reason || 'Call concluded');
-          }, 2000);
-        }
-      }
+          } else if (msg.type === 'user_query' && msg.text) {
+            const userText = msg.text.trim();
+            fullTranscription.push(`User: ${userText}`);
+            if (!userQuery) userQuery = userText;
 
-      if (event.type === 'input_audio_buffer.speech_started') {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(JSON.stringify({ type: 'interrupt' }));
+            if (geminiSession) {
+              geminiSession.sendClientContent({
+                turns: [{ role: 'user', parts: [{ text: userText }] }],
+                turnComplete: true
+              });
+            }
+          } else if (msg.type === 'hangup') {
+            endCallGracefully('User hung up');
+          }
+        } catch (e) {
+          console.error('Error handling client message in Gemini session:', e);
         }
-      }
+      });
+
+      clientWs.on('close', () => {
+        endCallGracefully('Caller disconnected');
+      });
+
     } catch (err) {
-      console.error('Error parsing OpenAI event:', err);
+      console.error('Failed to initialize Gemini Live session:', err.message);
+      startRestVoiceAgent();
     }
-  });
+  }
 
-  openAiWs.on('error', (err) => {
-    console.error('OpenAI WebSocket error:', err.message);
-    // Fallback to REST voice agent if WebSocket rejected
-    startRestVoiceAgent();
-  });
+  // --- DECIDE PROVIDER ---
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const aiProvider = process.env.AI_PROVIDER || 'gemini';
 
-  clientWs.on('message', (message) => {
-    try {
-      const msg = JSON.parse(message.toString());
+  if (aiProvider === 'gemini' && geminiKey && geminiKey !== 'your_gemini_api_key_here') {
+    startGeminiLiveSession(geminiKey);
+    return;
+  }
 
-      if (msg.type === 'audio_chunk' && msg.data) {
-        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-          openAiWs.send(JSON.stringify({
-            type: 'input_audio_buffer.append',
-            audio: msg.data
-          }));
-        }
-      } else if (msg.type === 'hangup') {
-        endCallGracefully('User hung up');
-      }
-    } catch (e) {
-      console.error('Error reading browser client message:', e);
-    }
-  });
-
-  clientWs.on('close', () => {
-    endCallGracefully('Caller disconnected');
-  });
+  // Otherwise, fallback to Rest / Simulation agent
+  startRestVoiceAgent();
 }
