@@ -177,23 +177,6 @@ export function handleWebCallSession(clientWs, phone, callSid) {
         callbacks: {
           onopen: function () {
             console.log('✅ Connected to Google Gemini 3.8 Live API');
-
-            // Send initial trigger to produce greeting voice
-            try {
-              geminiSession.sendClientContent({
-                turns: [
-                  {
-                    role: 'user',
-                    parts: [{
-                      text: 'Greet the caller warmly by saying: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"'
-                    }]
-                  }
-                ],
-                turnComplete: true
-              });
-            } catch (err) {
-              console.error('Error triggering initial greeting:', err);
-            }
           },
           onmessage: function (message) {
             try {
@@ -257,6 +240,23 @@ export function handleWebCallSession(clientWs, phone, callSid) {
         },
         config
       });
+
+      // Send initial trigger to produce greeting voice
+      try {
+        geminiSession.sendClientContent({
+          turns: [
+            {
+              role: 'user',
+              parts: [{
+                text: 'Greet the caller warmly by saying: "Hello! Thank you for calling Partnex. How can I help you with your software development project today?"'
+              }]
+            }
+          ],
+          turnComplete: true
+        });
+      } catch (err) {
+        console.error('Error triggering initial greeting:', err);
+      }
 
       // Handle audio and text messages from browser
       clientWs.on('message', (message) => {

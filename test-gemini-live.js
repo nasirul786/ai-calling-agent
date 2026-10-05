@@ -41,15 +41,6 @@ async function testGemini38Live() {
       callbacks: {
         onopen: function () {
           console.log('✅ Successfully connected to Gemini 3.8 Live socket!');
-          session.sendClientContent({
-            turns: [
-              {
-                role: 'user',
-                parts: [{ text: 'Hello, this is a test from Partnex AI web calling agent.' }]
-              }
-            ],
-            turnComplete: true
-          });
         },
         onmessage: function (message) {
           console.log('📥 Message received from Gemini Live API');
@@ -76,6 +67,16 @@ async function testGemini38Live() {
         }
       },
       config
+    });
+
+    session.sendClientContent({
+      turns: [
+        {
+          role: 'user',
+          parts: [{ text: 'Hello, this is a test from Partnex AI web calling agent.' }]
+        }
+      ],
+      turnComplete: true
     });
 
   } catch (err) {
